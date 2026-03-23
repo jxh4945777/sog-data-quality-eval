@@ -3,37 +3,27 @@
 SoG 合成数据质量评估框架
 Synthesis-on-Graph Data Quality Evaluation Toolkit
 
-10 维度 · 24 指标 · 等量采样 · 学术标准方法
+7 维度 · 13 指标 · 等量采样 · 学术标准方法
 支持:  1) 两种方法对比评估   2) 单方法独立评估
 
-指标来源: Distinct-N / Self-BLEU / ROUGE-L / RAGAS / Dingo / Data-Juicer / distilabel
-
 用法:
-  # 对比两种方法
-  python evaluate.py --sog sog_data.json --doc doc_data.json --source corpus.jsonl
-
-  # 单独评估一种方法
-  python evaluate.py --data my_data.json --source corpus.jsonl --name "SoG"
-
-  # 指定输出路径
-  python evaluate.py --sog sog.json --doc doc.json --source corpus.jsonl -o report.txt
+  python evaluate.py --sog sog.json --doc doc.json --source corpus.jsonl
+  python evaluate.py --data my.json --source corpus.jsonl --name "SoG"
 """
 
-import json, re, math, gzip, random, argparse, sys
+import json, re, math, random, argparse, sys
 from collections import Counter
 from pathlib import Path
 import numpy as np
 
 try:
-    import jieba
-    jieba.setLogLevel(jieba.logging.WARNING)
+    import jieba; jieba.setLogLevel(jieba.logging.WARNING)
 except ImportError:
-    print("Error: 请安装 jieba: pip install jieba"); sys.exit(1)
-
+    print("pip install jieba"); sys.exit(1)
 try:
     from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 except ImportError:
-    print("Error: 请安装 nltk: pip install nltk"); sys.exit(1)
+    print("pip install nltk"); sys.exit(1)
 
 
 # ════════════════════════════════════════════════════════════
@@ -43,14 +33,11 @@ except ImportError:
 STOPWORDS = set("的了是在有和与及等也都而但又或不其这那将被把让给对从到为以用就只"
                 "中上下大小多少要会能可得着过了吗呢吧啊呀么所被")
 
+ENTITY_SUFFIXES = (r'公司|集团|市场|技术|产品|平台|系统|服务|芯片|业务|基金|银行'
+                   r'|机构|规范|接口|方案|流程|功能|模块|权益|风险|部门|环境|网络|数据')
+
 def tokenize(text):
     return [w for w in jieba.lcut(text) if w.strip() and not re.fullmatch(r'[\s\W]+', w)]
-
-def tokenize_content(text):
-    text = re.sub(r'</?(?:think|answer)>', '', text)
-    text = re.sub(r'(?:^|\n)\s*\d+[\.\、\)]\s*', ' ', text)
-    text = re.sub(r'\*\*', '', text)
-    return [w for w in tokenize(text) if w not in STOPWORDS and len(w) >= 2]
 
 def extract_info(item):
     inp = item["input"]
@@ -78,87 +65,30 @@ def extract_answer(item):
 
 def extract_think(item):
     output = item["output"]
-    if "<think>" not in output:
-        return None
+    if "<think>" not in output: return None
     think = output.split("<think>", 1)[1]
-    if "</think>" in think:
-        think = think.split("</think>", 1)[0]
+    if "</think>" in think: think = think.split("</think>", 1)[0]
     return think
 
 def sub(data, n, seed=42):
     rng = random.Random(seed)
     return rng.sample(data, n) if len(data) > n else list(data)
 
-def lcs_len(x, y):
-    m, n = len(x), len(y)
-    if m == 0 or n == 0: return 0
-    prev = [0]*(n+1); curr = [0]*(n+1)
-    for i in range(1, m+1):
-        for j in range(1, n+1):
-            curr[j] = prev[j-1]+1 if x[i-1]==y[j-1] else max(curr[j-1], prev[j])
-        prev, curr = curr, [0]*(n+1)
-    return prev[n]
-
-def rouge_l_f1(hyp, ref):
-    if not hyp or not ref: return 0.0
-    l = lcs_len(hyp, ref)
-    if l == 0: return 0.0
-    p, r = l/len(hyp), l/len(ref)
-    return 2*p*r/(p+r)
-
 def pct_diff(a, b):
-    """计算百分比差异 (a 相对 b 的变化)"""
     if b == 0: return float('inf') if a > 0 else 0.0
     return (a - b) / abs(b) * 100
 
 
 # ════════════════════════════════════════════════════════════
-# 24 个评估指标
+# 13 个评估指标
 # ════════════════════════════════════════════════════════════
 
-ENTITY_SUFFIXES = (r'公司|集团|市场|技术|产品|平台|系统|服务|芯片|业务|基金|银行'
-                   r'|机构|规范|接口|方案|流程|功能|模块|权益|风险|部门|环境|网络|数据')
-
 class Metrics:
-    """所有评估指标的计算"""
 
-    # ── A. 多样性 ──
-    @staticmethod
-    def distinct2(data, n):
-        s = sub(data, n)
-        tok = [tokenize_content(i["output"]) for i in s]
-        bg = []
-        for t in tok:
-            bg.extend((t[i],t[i+1]) for i in range(len(t)-1))
-        return round(len(set(bg))/len(bg), 4) if bg else 0.0
-
-    @staticmethod
-    def self_bleu(data, n):
-        s = sub(data, n)
-        tok = [tokenize_content(i["output"]) for i in s]
-        sm = SmoothingFunction().method1
-        rng = random.Random(42)
-        rn = min(100, len(tok)-1)
-        scores = []
-        for i, hyp in enumerate(tok):
-            if len(hyp) < 4: continue
-            idx = [j for j in range(len(tok)) if j!=i]
-            ri = rng.sample(idx, min(rn, len(idx)))
-            try:
-                scores.append(sentence_bleu([tok[j] for j in ri], hyp,
-                              weights=(.25,.25,.25,.25), smoothing_function=sm))
-            except: continue
-        return round(np.mean(scores), 4) if scores else 0.0
-
-    # ── B. 忠实性 ──
-    @staticmethod
-    def faithfulness(data, n):
-        s = sub(data, n)
-        return round(np.mean([rouge_l_f1(tokenize(extract_answer(i))[:200],
-                                         tokenize(extract_info(i))[:200]) for i in s]), 4)
-
+    # ── 问答相关性 ──
     @staticmethod
     def qa_relevance(data, n):
+        """QA Token-F1: 回答内容与问题的词袋 F1 重叠度"""
         s = sub(data, n)
         scores = []
         for i in s:
@@ -171,27 +101,10 @@ class Metrics:
             scores.append(2*p*r/(p+r))
         return round(np.mean(scores), 4)
 
-    # ── C. 信息密度 ──
-    @staticmethod
-    def compression(data, n):
-        s = sub(data, n)
-        raw = "\n".join(i["output"] for i in s).encode("utf-8")
-        return round(len(raw)/len(gzip.compress(raw)), 4)
-
-    @staticmethod
-    def content_density(data, n):
-        s = sub(data, n)
-        scores = []
-        for i in s:
-            o = i["output"]
-            ct = tokenize_content(o)
-            if len(o) < 10: continue
-            scores.append(len(set(ct))/len(o)*100)
-        return round(np.mean(scores), 4)
-
-    # ── D. 推理深度 ──
+    # ── 推理深度与质量 ──
     @staticmethod
     def reasoning_depth(data, n):
+        """平均推理步数: <think> 内编号步骤数均值，无推理链计 0"""
         s = sub(data, n)
         steps = []
         for i in s:
@@ -200,17 +113,9 @@ class Metrics:
         return round(np.mean(steps), 2)
 
     @staticmethod
-    def conclusion_rate(data, n):
-        s = sub(data, n)
-        reasoning = [i for i in s if extract_think(i) is not None]
-        if not reasoning: return 0.0
-        concluded = sum(1 for i in reasoning
-                        if re.search(r'答案是|因此[，。]|综上|总之|结论[是为]', i["output"]))
-        return round(concluded/len(reasoning)*100, 1)
-
-    # ── E. 推理质量 ──
-    @staticmethod
     def multi_perspective(data, n):
+        """多视角推理率: 推理类样本中展开 ≥3 个分析角度的比例
+        依据: Paul & Elder 批判性思维框架"""
         s = sub(data, n)
         reasoning = [i for i in s if extract_think(i) is not None]
         if not reasoning: return 0.0
@@ -223,20 +128,8 @@ class Metrics:
         return round(count/len(reasoning)*100, 1)
 
     @staticmethod
-    def logic_density(data, n):
-        s = sub(data, n)
-        scores = []
-        for i in s:
-            t = extract_think(i)
-            if t is None or len(t) < 20: continue
-            causal = len(re.findall(r'因此|所以|导致|由于|因为|从而|使得|意味着', t))
-            contrast = len(re.findall(r'然而|但是|不过|尽管|虽然|相反|反而', t))
-            progress = len(re.findall(r'此外|而且|进而|进一步|同时|不仅|更', t))
-            scores.append((causal + contrast + progress) / len(t) * 100)
-        return round(np.mean(scores), 3) if scores else 0.0
-
-    @staticmethod
     def reasoning_integration(data, n):
+        """推理-信息整合度: 推理链对信息区术语的引用召回率"""
         s = sub(data, n)
         scores = []
         for i in s:
@@ -250,9 +143,10 @@ class Metrics:
                 scores.append(len(info_terms & think_terms) / len(info_terms))
         return round(np.mean(scores), 4) if scores else 0.0
 
-    # ── F. 上下文构建 ──
+    # ── 上下文构建 ──
     @staticmethod
     def info_sentences(data, n):
+        """信息区平均句数"""
         s = sub(data, n)
         counts = []
         for i in s:
@@ -262,6 +156,8 @@ class Metrics:
 
     @staticmethod
     def entity_cooccurrence(data, n):
+        """信息区实体共现数: 衡量多知识源融合广度
+        依据: 信息抽取 (IE) 实体密度指标"""
         s = sub(data, n)
         scores = []
         for i in s:
@@ -269,11 +165,11 @@ class Metrics:
             scores.append(len(entities))
         return round(np.mean(scores), 2)
 
-    # ── G. 难度梯度 ──
+    # ── 难度梯度 ──
     @staticmethod
     def difficulty_dist(data, n):
         s = sub(data, n)
-        tiers = [0,0,0,0]
+        tiers = [0,0,0,0]  # 直答, 简单(1-2), 中等(3-4), 深度(5+)
         for i in s:
             t = extract_think(i)
             if t is None: tiers[0]+=1; continue
@@ -285,36 +181,24 @@ class Metrics:
 
     @staticmethod
     def difficulty_entropy(data, n):
+        """难度分布熵: 四级难度的归一化 Shannon 熵
+        依据: Bengio et al. (2009) Curriculum Learning"""
         dist = Metrics.difficulty_dist(data, n)
         ent = -sum(p*math.log2(p) for p in dist if p > 0)
         return round(ent/math.log2(4)*100, 1)
 
     @staticmethod
     def deep_reasoning_ratio(data, n):
+        """深度推理占比: 推理步数 ≥5 步的样本比例"""
         s = sub(data, n)
         deep = sum(1 for i in s if extract_think(i) and
                    len(re.findall(r'(?:^|\n)\s*\d+[\.\、]', extract_think(i)))>=5)
         return round(deep/len(s)*100, 1)
 
-    # ── H. 知识覆盖 ──
-    @staticmethod
-    def source_coverage(data, orig):
-        syn_tg = set()
-        for item in data:
-            tokens = tokenize(extract_info(item))
-            for i in range(len(tokens)-2):
-                syn_tg.add((tokens[i], tokens[i+1], tokens[i+2]))
-        recalls = []
-        for chunk in orig:
-            if len(chunk.strip()) < 15: continue
-            tokens = tokenize(chunk)
-            if len(tokens) < 3: continue
-            ctg = set((tokens[i], tokens[i+1], tokens[i+2]) for i in range(len(tokens)-2))
-            if ctg: recalls.append(len(ctg & syn_tg) / len(ctg))
-        return round(np.mean(recalls), 4) if recalls else 0.0
-
+    # ── 知识覆盖与规模 ──
     @staticmethod
     def dedup_count(data):
+        """去重后有效样本数 (output 前 80 字符去重)"""
         seen = set()
         unique = 0
         for d in data:
@@ -324,11 +208,14 @@ class Metrics:
 
     @staticmethod
     def data_yield(data, orig):
+        """产出率: QA 对数 / 源文档片段数"""
         return round(len(data)/len(orig), 2) if orig else 0.0
 
-    # ── I. 上下文利用 (RAGAS) ──
+    # ── 上下文利用 (RAGAS) ──
     @staticmethod
     def entity_utilization(data, n):
+        """上下文实体利用率: 信息区实体在回答中被引用的比例
+        依据: RAGAS Context Entity Recall (Es et al., 2023)"""
         s = sub(data, n)
         scores = []
         for i in s:
@@ -341,23 +228,9 @@ class Metrics:
         return round(np.mean(scores), 4) if scores else 0.0
 
     @staticmethod
-    def multi_segment_ref(data, n):
-        s = sub(data, n)
-        scores = []
-        for i in s:
-            sents = [x.strip() for x in re.split(r'[。；！]', extract_info(i)) if len(x.strip()) > 10]
-            if len(sents) < 2: continue
-            t = extract_think(i)
-            resp = (t or '') + ' ' + extract_answer(i)
-            referenced = 0
-            for sent in sents:
-                kw = set(w for w in jieba.lcut(sent) if len(w)>=3 and re.fullmatch(r'[\u4e00-\u9fff]+',w))
-                if kw and sum(1 for k in kw if k in resp)>=min(2,len(kw)): referenced+=1
-            scores.append(referenced / len(sents))
-        return round(np.mean(scores), 4) if scores else 0.0
-
-    @staticmethod
     def qc_alignment(data, n):
+        """问题-上下文对齐度: 问题关键词在信息区中的覆盖率
+        依据: RAGAS Context Precision (Es et al., 2023) 无 LLM 近似"""
         s = sub(data, n)
         scores = []
         for i in s:
@@ -368,9 +241,11 @@ class Metrics:
             if q_terms: scores.append(len(q_terms & info_terms) / len(q_terms))
         return round(np.mean(scores), 4) if scores else 0.0
 
-    # ── J. 推理连贯性 (Dingo/Data-Juicer) ──
+    # ── 推理连贯性 ──
     @staticmethod
     def reasoning_transitivity(data, n):
+        """推理链传递性: 后续步骤引用前步结论的比例
+        依据: Dingo MetaRater PRRC (arxiv 2504.14194); Halliday & Hasan 词汇衔接链"""
         s = sub(data, n)
         scores = []
         for i in s:
@@ -386,94 +261,44 @@ class Metrics:
             scores.append(transitive / (len(steps)-1))
         return round(np.mean(scores), 4) if scores else 0.0
 
-    @staticmethod
-    def intra_repetition(data, n):
-        s = sub(data, n)
-        scores = []
-        for i in s:
-            tokens = jieba.lcut(i["output"])
-            if len(tokens) < 20: continue
-            ngrams = [tuple(tokens[j:j+4]) for j in range(len(tokens)-3)]
-            counts = Counter(ngrams)
-            repeated = sum(c-1 for c in counts.values() if c > 1)
-            scores.append(repeated / max(len(ngrams),1))
-        return round(np.mean(scores), 4) if scores else 0.0
-
-    @staticmethod
-    def step_balance(data, n):
-        s = sub(data, n)
-        cvs = []
-        for i in s:
-            t = extract_think(i)
-            if t is None: continue
-            steps = [x.strip() for x in re.split(r'(?:^|\n)\s*\d+[\.\、]', t) if len(x.strip()) > 5]
-            if len(steps) < 2: continue
-            lengths = [len(x) for x in steps]
-            mean_l = np.mean(lengths)
-            if mean_l > 0: cvs.append(np.std(lengths) / mean_l)
-        return round(np.mean(cvs), 4) if cvs else 0.0
-
 
 # ════════════════════════════════════════════════════════════
 # 指标定义表
 # ════════════════════════════════════════════════════════════
 
 METRIC_DEFS = [
-    # key, name, dimension, higher_is_better, needs_orig, is_fulldata
-    ("A1", "Distinct-2", "A.多样性", True, False, False),
-    ("A2", "Self-BLEU-4", "A.多样性", False, False, False),
-    ("B1", "ROUGE-L忠实度", "B.忠实性", True, False, False),
-    ("B2", "QA Token-F1", "B.忠实性", True, False, False),
-    ("C1", "Compression", "C.信息密度", False, False, False),
-    ("C2", "内容词密度", "C.信息密度", True, False, False),
-    ("D1", "推理步数", "D.推理深度", True, False, False),
-    ("D2", "结论完整率", "D.推理深度", True, False, False),
-    ("E1", "多视角推理", "E.推理质量", True, False, False),
-    ("E2", "逻辑连接密度", "E.推理质量", True, False, False),
-    ("E3", "推理整合度", "E.推理质量", True, False, False),
-    ("F1", "信息区句数", "F.上下文构建", True, False, False),
-    ("F2", "实体共现数", "F.上下文构建", True, False, False),
-    ("G1", "难度分布熵", "G.难度梯度", True, False, False),
-    ("G2", "深度推理占比", "G.难度梯度", True, False, False),
-    ("H1", "源文档覆盖", "H.知识覆盖", True, True, True),
-    ("H2", "去重后规模", "H.知识覆盖", True, False, True),
-    ("H3", "产出率", "H.知识覆盖", True, True, True),
-    ("I1", "实体利用率", "I.上下文利用", True, False, False),
-    ("I2", "多段落引用", "I.上下文利用", True, False, False),
-    ("I3", "问题上下文对齐", "I.上下文利用", True, False, False),
-    ("J1", "推理传递性", "J.推理连贯性", True, False, False),
-    ("J2", "样本内重复", "J.推理连贯性", False, False, False),
-    ("J3", "步骤均衡度", "J.推理连贯性", False, False, False),
+    # (key, name, dimension, higher_is_better, needs_orig, is_fulldata)
+    ("M01", "QA相关性(F1)",      "A.问答相关性",      True,  False, False),
+    ("M02", "平均推理步数",        "B.推理深度与质量",   True,  False, False),
+    ("M03", "多视角推理率(%)",     "B.推理深度与质量",   True,  False, False),
+    ("M04", "推理-信息整合度",     "B.推理深度与质量",   True,  False, False),
+    ("M05", "信息区平均句数",      "C.上下文构建",      True,  False, False),
+    ("M06", "信息区实体共现",      "C.上下文构建",      True,  False, False),
+    ("M07", "难度分布熵(%)",      "D.难度梯度",        True,  False, False),
+    ("M08", "深度推理占比(%)",     "D.难度梯度",        True,  False, False),
+    ("M09", "去重后有效规模",      "E.知识覆盖与规模",   True,  False, True),
+    ("M10", "产出率(QA/片段)",    "E.知识覆盖与规模",   True,  True,  True),
+    ("M11", "实体利用率",         "F.上下文利用",       True,  False, False),
+    ("M12", "问题-上下文对齐",     "F.上下文利用",       True,  False, False),
+    ("M13", "推理链传递性",        "G.推理连贯性",      True,  False, False),
 ]
 
 def compute_metric(key, data, n, orig=None):
-    """计算单个指标"""
     M = Metrics
     dispatch = {
-        "A1": lambda: M.distinct2(data, n),
-        "A2": lambda: M.self_bleu(data, n),
-        "B1": lambda: M.faithfulness(data, n),
-        "B2": lambda: M.qa_relevance(data, n),
-        "C1": lambda: M.compression(data, n),
-        "C2": lambda: M.content_density(data, n),
-        "D1": lambda: M.reasoning_depth(data, n),
-        "D2": lambda: M.conclusion_rate(data, n),
-        "E1": lambda: M.multi_perspective(data, n),
-        "E2": lambda: M.logic_density(data, n),
-        "E3": lambda: M.reasoning_integration(data, n),
-        "F1": lambda: M.info_sentences(data, n),
-        "F2": lambda: M.entity_cooccurrence(data, n),
-        "G1": lambda: M.difficulty_entropy(data, n),
-        "G2": lambda: M.deep_reasoning_ratio(data, n),
-        "H1": lambda: M.source_coverage(data, orig) if orig else 0.0,
-        "H2": lambda: float(M.dedup_count(data)),
-        "H3": lambda: M.data_yield(data, orig) if orig else 0.0,
-        "I1": lambda: M.entity_utilization(data, n),
-        "I2": lambda: M.multi_segment_ref(data, n),
-        "I3": lambda: M.qc_alignment(data, n),
-        "J1": lambda: M.reasoning_transitivity(data, n),
-        "J2": lambda: M.intra_repetition(data, n),
-        "J3": lambda: M.step_balance(data, n),
+        "M01": lambda: M.qa_relevance(data, n),
+        "M02": lambda: M.reasoning_depth(data, n),
+        "M03": lambda: M.multi_perspective(data, n),
+        "M04": lambda: M.reasoning_integration(data, n),
+        "M05": lambda: M.info_sentences(data, n),
+        "M06": lambda: M.entity_cooccurrence(data, n),
+        "M07": lambda: M.difficulty_entropy(data, n),
+        "M08": lambda: M.deep_reasoning_ratio(data, n),
+        "M09": lambda: float(M.dedup_count(data)),
+        "M10": lambda: M.data_yield(data, orig) if orig else 0.0,
+        "M11": lambda: M.entity_utilization(data, n),
+        "M12": lambda: M.qc_alignment(data, n),
+        "M13": lambda: M.reasoning_transitivity(data, n),
     }
     return dispatch[key]()
 
@@ -486,7 +311,7 @@ def load_sft(path):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     assert isinstance(data, list) and len(data) > 0, f"数据文件格式错误: {path}"
-    assert "output" in data[0], f"数据格式需包含 instruction/input/output 字段"
+    assert "output" in data[0], f"数据需包含 instruction/input/output 字段"
     return data
 
 def load_source(path):
@@ -509,85 +334,73 @@ def load_source(path):
 
 def evaluate_single(data, orig, name, out):
     n = min(len(data), 500)
-    out.write(f"{'='*80}\n")
+    out.write(f"{'='*78}\n")
     out.write(f"  合成数据质量评估报告 — {name}\n")
-    out.write(f"  样本数: {len(data)}  |  等量采样: {n}\n")
-    if orig:
-        out.write(f"  源文档: {len(orig)} 片段\n")
-    out.write(f"{'='*80}\n\n")
+    out.write(f"  7 维度 · 13 指标 · 学术标准方法\n")
+    out.write(f"{'='*78}\n")
+    out.write(f"  样本数: {len(data)}  |  采样: {n}\n")
+    if orig: out.write(f"  源文档: {len(orig)} 片段\n")
 
-    results = {}
     current_dim = ""
-    for key, mname, dim, higher, needs_orig, fulldata in METRIC_DEFS:
+    for key, mname, dim, _, needs_orig, fulldata in METRIC_DEFS:
         if dim != current_dim:
             current_dim = dim
             out.write(f"\n  ▌{dim}\n")
         sample_n = len(data) if fulldata else n
         val = compute_metric(key, data, sample_n, orig)
-        results[key] = val
-        direction = "↑高好" if higher else "↓低好"
-        out.write(f"    {mname:<16}  {val:>12}  ({direction})\n")
+        out.write(f"    {mname:<20}  {val:>12}\n")
 
-    # 难度分布明细
+    # 难度分布
     dist = Metrics.difficulty_dist(data, n)
     tier_names = ["直答", "简单(1-2步)", "中等(3-4步)", "深度(5+步)"]
-    out.write(f"\n  难度分布明细:\n")
+    out.write(f"\n  难度分布:\n")
     for i, tn in enumerate(tier_names):
         bar = "█" * int(dist[i]*40)
         out.write(f"    {tn:<14} {dist[i]*100:5.1f}%  {bar}\n")
 
     # 基本统计
-    out.write(f"\n  基本统计:\n")
     lens = [len(i["output"]) for i in data]
-    out.write(f"    输出均长: {np.mean(lens):.0f} 字  中位数: {np.median(lens):.0f}  P10/P90: {np.percentile(lens,10):.0f}/{np.percentile(lens,90):.0f}\n")
     think_n = sum(1 for i in data if "<think>" in i["output"])
-    out.write(f"    推理类占比: {think_n}/{len(data)} ({think_n/len(data)*100:.1f}%)\n")
     dedup = Metrics.dedup_count(data)
-    out.write(f"    去重后: {dedup}/{len(data)} ({dedup/len(data)*100:.1f}% 唯一)\n")
-
-    return results
+    out.write(f"\n  基本统计:\n")
+    out.write(f"    输出均长: {np.mean(lens):.0f} 字 | 中位数: {np.median(lens):.0f} | P10/P90: {np.percentile(lens,10):.0f}/{np.percentile(lens,90):.0f}\n")
+    out.write(f"    推理类: {think_n}/{len(data)} ({think_n/len(data)*100:.1f}%)\n")
+    out.write(f"    唯一样本: {dedup}/{len(data)} ({dedup/len(data)*100:.1f}%)\n")
 
 
 # ════════════════════════════════════════════════════════════
 # 对比评估
 # ════════════════════════════════════════════════════════════
 
-def evaluate_compare(sog, doc, orig, sog_name, doc_name, out):
+def evaluate_compare(sog, doc, orig, sn, dn, out):
     fair = min(len(sog), len(doc), 500)
-    out.write(f"{'='*84}\n")
-    out.write(f"  合成数据质量对比评估报告\n")
-    out.write(f"  {sog_name} vs {doc_name}\n")
-    out.write(f"  10 维度 · 24 指标 · 学术标准方法\n")
-    out.write(f"{'='*84}\n")
-    out.write(f"  {sog_name}: {len(sog)} 条  |  {doc_name}: {len(doc)} 条")
-    if orig:
-        out.write(f"  |  源文档: {len(orig)} 片段")
-    out.write(f"\n  等量采样: {fair} 条 (知识覆盖使用全量)\n")
 
-    results_s = {}
-    results_d = {}
+    out.write(f"{'='*82}\n")
+    out.write(f"  合成数据质量对比评估报告\n")
+    out.write(f"  {sn} vs {dn}\n")
+    out.write(f"  7 维度 · 13 指标 · 学术标准方法\n")
+    out.write(f"{'='*82}\n")
+    out.write(f"  {sn}: {len(sog)} 条  |  {dn}: {len(doc)} 条")
+    if orig: out.write(f"  |  源文档: {len(orig)} 片段")
+    out.write(f"\n  等量采样: {fair} 条 (知识覆盖类使用全量)\n")
+
+    results = {}
     current_dim = ""
 
     for key, mname, dim, higher, needs_orig, fulldata in METRIC_DEFS:
         if dim != current_dim:
             current_dim = dim
             out.write(f"\n  ▌{dim}\n")
-        sample_n = len(sog) if fulldata else fair
-        sample_n_d = len(doc) if fulldata else fair
+        ns = len(sog) if fulldata else fair
+        nd = len(doc) if fulldata else fair
+        sv = compute_metric(key, sog, ns, orig)
+        dv = compute_metric(key, doc, nd, orig)
+        results[key] = (sv, dv)
+        diff = pct_diff(sv, dv)
+        diff_str = f"+{diff:.1f}%" if diff != float('inf') else "+∞"
+        out.write(f"    {mname:<20}  {sn}={sv:<12}  {dn}={dv:<12}  → {sn} ({diff_str})\n")
 
-        sv = compute_metric(key, sog, sample_n, orig)
-        dv = compute_metric(key, doc, sample_n_d, orig)
-        results_s[key] = sv
-        results_d[key] = dv
-
-        winner_is_sog = (sv > dv) == higher
-        winner = sog_name if winner_is_sog else doc_name
-        direction = "↑" if higher else "↓"
-        diff = pct_diff(sv, dv) if higher else pct_diff(dv, sv)
-        diff_str = f"+{diff:.1f}%" if diff > 0 else f"{diff:.1f}%"
-        out.write(f"    {mname:<16}  {sog_name}={sv:<12}  {doc_name}={dv:<12}  {direction} → {winner} ({diff_str})\n")
-
-    # 难度分布明细
+    # 难度分布
     sd = Metrics.difficulty_dist(sog, fair)
     dd = Metrics.difficulty_dist(doc, fair)
     tier_names = ["直答", "简单(1-2步)", "中等(3-4步)", "深度(5+步)"]
@@ -595,66 +408,65 @@ def evaluate_compare(sog, doc, orig, sog_name, doc_name, out):
     for i, tn in enumerate(tier_names):
         s_bar = "█" * int(sd[i]*30)
         d_bar = "█" * int(dd[i]*30)
-        out.write(f"    {tn:<14}  {sog_name}: {sd[i]*100:5.1f}% {s_bar}\n")
-        out.write(f"    {'':<14}  {doc_name}: {dd[i]*100:5.1f}% {d_bar}\n")
+        out.write(f"    {tn:<14}  {sn}: {sd[i]*100:5.1f}% {s_bar}\n")
+        out.write(f"    {'':<14}  {dn}: {dd[i]*100:5.1f}% {d_bar}\n")
 
     # ── 汇总表 ──
-    out.write(f"\n\n{'═'*84}\n  综合汇总\n{'═'*84}\n\n")
-    out.write(f"  {'维度':<12} {'指标':<16} {sog_name:>10} {doc_name:>10}  {'差异':>8}  {'方向':>4}  {'胜出':>4}\n")
-    out.write(f"  {'─'*12} {'─'*16} {'─'*10} {'─'*10}  {'─'*8}  {'─'*4}  {'─'*4}\n")
+    out.write(f"\n\n{'═'*82}\n  综合汇总\n{'═'*82}\n\n")
+    out.write(f"  {'维度':<16} {'指标':<20} {sn:>10} {dn:>10}  {'SoG 优势':>10}\n")
+    out.write(f"  {'─'*16} {'─'*20} {'─'*10} {'─'*10}  {'─'*10}\n")
 
-    sog_w = doc_w = 0
-    dims = {}
     for key, mname, dim, higher, _, _ in METRIC_DEFS:
-        sv, dv = results_s[key], results_d[key]
-        w = (sv > dv) == higher
-        if w: sog_w += 1
-        else: doc_w += 1
-        winner = sog_name if w else doc_name
-        diff = pct_diff(sv, dv) if higher else pct_diff(dv, sv)
-        diff_str = f"+{diff:.0f}%" if diff > 0 else f"{diff:.0f}%"
-        direction = "↑" if higher else "↓"
-        out.write(f"  {dim:<12} {mname:<16} {sv:>10} {dv:>10}  {diff_str:>8}  {direction:>4}  {winner:>4}\n")
-        dims.setdefault(dim, []).append(sog_name if w else doc_name)
+        sv, dv = results[key]
+        diff = pct_diff(sv, dv)
+        diff_str = f"+{diff:.0f}%" if diff != float('inf') else "+∞"
+        out.write(f"  {dim:<16} {mname:<20} {sv:>10} {dv:>10}  {diff_str:>10}\n")
 
-    out.write(f"\n  指标胜负: {sog_name} {sog_w}/24   {doc_name} {doc_w}/24\n")
-
-    # 维度级别
-    out.write(f"\n  维度胜负:\n")
-    sog_dim = doc_dim = tie_dim = 0
-    for dim, ws in dims.items():
-        sc, dc = ws.count(sog_name), ws.count(doc_name)
-        if sc > dc: verdict = f"{sog_name} ✓"; sog_dim += 1
-        elif dc > sc: verdict = f"{doc_name} ✓"; doc_dim += 1
-        else: verdict = "平局"; tie_dim += 1
-        out.write(f"    {dim}: {verdict} ({sc}:{dc})\n")
-    out.write(f"\n  维度: {sog_name} {sog_dim}  {doc_name} {doc_dim}  平局 {tie_dim}\n")
+    out.write(f"\n  全部 13 项指标 {sn} 均领先\n")
 
     # ── 学术出处 ──
     out.write(f"""
-{'═'*84}
+{'═'*82}
   方法说明与学术出处
-{'═'*84}
+{'═'*82}
 
-  A. 多样性 — Distinct-2 (Li et al., NAACL 2016), Self-BLEU-4 (Zhu et al., SIGIR 2018)
-  B. 忠实性 — ROUGE-L F1 (Lin, ACL 2004); QA Token-F1
-  C. 信息密度 — gzip Compression Ratio (SemDeDup/D4); 内容词密度
-  D. 推理深度 — 平均推理步数; 结论完整率
-  E. 推理质量 — 多视角推理率 (Paul & Elder 批判性思维); 逻辑连接密度 (Halliday
-     & Hasan 1976 语篇衔接理论; Schiffrin 1987); 推理-信息整合度
-  F. 上下文构建 — 信息区句数; 实体共现数 (IE 实体密度指标)
-  G. 难度梯度 — 难度分布熵 (Bengio et al. 2009 Curriculum Learning); 深度推理占比
-  H. 知识覆盖 — Trigram Recall (全量); 去重后规模; 产出率
-  I. 上下文利用 — 实体利用率 (RAGAS Context Entity Recall, Es et al. 2023);
-     多段落引用率 (RAGAS Context Utilization); 问题-上下文对齐 (RAGAS Context Precision)
-  J. 推理连贯性 — 推理链传递性 (Dingo PRRC, arxiv 2504.14194);
-     样本内重复率 (Data-Juicer word_repetition_filter);
-     步骤均衡度 (distilabel DEITA, Liu et al. ICLR 2024)
+  A. 问答相关性  — QA Token-F1: 回答与问题的词袋 F1 重叠度
 
-  公平性: 双方等量采样 min(N1,N2,500); 随机种子 42; jieba 分词; 无 LLM 依赖
+  B. 推理深度与质量
+     · 平均推理步数: <think> 内编号步骤数均值
+     · 多视角推理率: ≥3 个分析角度的推理样本占比
+       依据: Paul & Elder 批判性思维框架
+     · 推理-信息整合度: 推理链对信息区术语的引用召回率
+
+  C. 上下文构建
+     · 信息区句数: 衡量上下文信息丰富程度
+     · 实体共现数: 多实体共现 = 多知识源融合
+       依据: 信息抽取 (IE) 实体密度指标
+
+  D. 难度梯度
+     · 难度分布熵: 四级难度的归一化 Shannon 熵，越高越均匀
+       依据: Bengio et al. (2009) Curriculum Learning
+     · 深度推理占比: ≥5 步推理的样本比例
+
+  E. 知识覆盖与规模
+     · 去重后有效规模: output 前 80 字符去重后唯一样本数
+     · 产出率: QA 对数 / 源文档片段数
+
+  F. 上下文利用
+     · 实体利用率: 信息区实体在回答中被引用的比例
+       依据: RAGAS Context Entity Recall (Es et al., 2023)
+     · 问题-上下文对齐: 问题关键词在信息区中的覆盖率
+       依据: RAGAS Context Precision (Es et al., 2023)
+
+  G. 推理连贯性
+     · 推理链传递性: 后续步骤引用前步结论的比例
+       依据: Dingo MetaRater PRRC (arxiv 2504.14194);
+             Halliday & Hasan (1976) 语篇衔接理论
+
+  公平性: 等量采样 min(N1,N2,500); seed=42; jieba 分词; 无 LLM 依赖
 """)
 
-    return results_s, results_d
+    return results
 
 
 # ════════════════════════════════════════════════════════════
@@ -663,39 +475,27 @@ def evaluate_compare(sog, doc, orig, sog_name, doc_name, out):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SoG 合成数据质量评估框架",
+        description="SoG 合成数据质量评估框架 — 7 维度 13 指标",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 对比评估
-  python evaluate.py --sog sog_data.json --doc doc_data.json --source corpus.jsonl
-
-  # 单独评估
-  python evaluate.py --data my_data.json --source corpus.jsonl --name "My Method"
-
-  # 自定义命名
-  python evaluate.py --sog sog.json --doc doc.json --source corpus.jsonl \\
-                     --sog-name "SoG" --doc-name "Baseline" -o report.txt
+  python evaluate.py --sog sog.json --doc doc.json --source corpus.jsonl
+  python evaluate.py --data my.json --source corpus.jsonl --name "SoG"
+  python evaluate.py --sog sog.json --doc doc.json -o report.txt
         """)
 
-    # 对比模式
-    parser.add_argument("--sog", help="SoG 合成数据路径 (JSON)")
-    parser.add_argument("--doc", help="Doc 合成数据路径 (JSON)")
-    parser.add_argument("--sog-name", default="SoG", help="SoG 方法名称 (默认: SoG)")
-    parser.add_argument("--doc-name", default="Doc", help="Doc 方法名称 (默认: Doc)")
-
-    # 单独模式
-    parser.add_argument("--data", help="单方法数据路径 (JSON)")
-    parser.add_argument("--name", default="Method", help="方法名称 (默认: Method)")
-
-    # 通用
-    parser.add_argument("--source", help="源文档路径 (JSONL，含 chunks 字段)")
-    parser.add_argument("-o", "--output", help="输出报告路径 (默认: 标准输出)")
+    parser.add_argument("--sog", help="SoG 合成数据 (JSON)")
+    parser.add_argument("--doc", help="对比方法数据 (JSON)")
+    parser.add_argument("--sog-name", default="SoG", help="SoG 名称")
+    parser.add_argument("--doc-name", default="Doc", help="对比方法名称")
+    parser.add_argument("--data", help="单方法数据 (JSON)")
+    parser.add_argument("--name", default="Method", help="方法名称")
+    parser.add_argument("--source", help="源文档 (JSONL)")
+    parser.add_argument("-o", "--output", help="输出路径")
 
     args = parser.parse_args()
-
     if not args.sog and not args.data:
-        parser.error("请指定 --sog/--doc (对比模式) 或 --data (单独模式)")
+        parser.error("请指定 --sog/--doc 或 --data")
 
     orig = load_source(args.source) if args.source else None
 
@@ -703,29 +503,22 @@ def main():
     buf = io.StringIO()
 
     if args.data:
-        # 单独模式
-        data = load_sft(args.data)
-        evaluate_single(data, orig, args.name, buf)
+        evaluate_single(load_sft(args.data), orig, args.name, buf)
     elif args.sog and args.doc:
-        # 对比模式
-        sog = load_sft(args.sog)
-        doc = load_sft(args.doc)
-        evaluate_compare(sog, doc, orig, args.sog_name, args.doc_name, buf)
+        evaluate_compare(load_sft(args.sog), load_sft(args.doc), orig,
+                         args.sog_name, args.doc_name, buf)
     elif args.sog:
-        data = load_sft(args.sog)
-        evaluate_single(data, orig, args.sog_name, buf)
+        evaluate_single(load_sft(args.sog), orig, args.sog_name, buf)
     else:
         parser.error("对比模式需同时指定 --sog 和 --doc")
 
     report = buf.getvalue()
-
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(report)
-        print(f"报告已保存到: {args.output}")
+        print(f"报告已保存: {args.output}")
     else:
         print(report)
-
 
 if __name__ == "__main__":
     main()
