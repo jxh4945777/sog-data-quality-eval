@@ -1,23 +1,51 @@
-# SoG 数据质量评估 — LLM 配置
-# 复制为 config.yaml 并填写配置
+# ════════════════════════════════════════════════════════
+# SoG Data Quality Evaluation — LLM 配置
+# ════════════════════════════════════════════════════════
+#
+# 使用方法:
+#   1. 复制本文件: cp config.example.yaml config.yaml
+#   2. 填写 API 配置
+#   3. 运行: python evaluate.py --sog sog.json --doc doc.json --llm-judge --llm-config config.yaml
+#
+# 也可通过环境变量配置 (优先级低于配置文件):
+#   export LLM_API_BASE="https://api.openai.com/v1"
+#   export LLM_API_KEY="sk-your-key"
+#   export LLM_MODEL="gpt-4o-mini"
 
-# 方式 1: OpenAI 兼容 API (云端)
+# ── API 设置 ──────────────────────────────────────────
+
+# OpenAI 官方 API
 api_base: "https://api.openai.com/v1"
 api_key: "sk-your-key-here"
 model: "gpt-4o-mini"
 
-# 方式 2: 自定义 API (如中转站)
+# 自定义中转站 (取消注释以启用)
 # api_base: "https://your-proxy.com/v1"
-# api_key: "your-key"
+# api_key: "your-proxy-key"
 # model: "gpt-4o-mini"
 
-# 方式 3: 本地部署 (vLLM / Ollama / llama.cpp)
-# api_base: "http://localhost:8000/v1"   # vLLM
-# api_base: "http://localhost:11434/v1"  # Ollama
+# vLLM 本地部署
+# api_base: "http://localhost:8000/v1"
 # api_key: "not-needed"
-# model: "qwen2.5-72b-instruct"
+# model: "Qwen/Qwen2.5-72B-Instruct"
 
-# 评估参数
+# Ollama 本地部署
+# api_base: "http://localhost:11434/v1"
+# api_key: "ollama"
+# model: "qwen2.5:72b"
+
+# llama.cpp server
+# api_base: "http://localhost:8080/v1"
+# api_key: "not-needed"
+# model: "local-model"
+
+# ── 评估参数 ──────────────────────────────────────────
+
+# 生成温度 (越低越确定性, 推荐 0.1 以保证评估一致性)
 temperature: 0.1
+
+# API 调用失败时的最大重试次数
 max_retries: 3
+
+# 重试间隔 (秒)
 retry_delay: 2
