@@ -1,0 +1,23 @@
+# SoG 数据质量评估 — LLM 配置
+# 复制为 config.yaml 并填写配置
+
+# 方式 1: OpenAI 兼容 API (云端)
+api_base: "https://api.openai.com/v1"
+api_key: "sk-your-key-here"
+model: "gpt-4o-mini"
+
+# 方式 2: 自定义 API (如中转站)
+# api_base: "https://your-proxy.com/v1"
+# api_key: "your-key"
+# model: "gpt-4o-mini"
+
+# 方式 3: 本地部署 (vLLM / Ollama / llama.cpp)
+# api_base: "http://localhost:8000/v1"   # vLLM
+# api_base: "http://localhost:11434/v1"  # Ollama
+# api_key: "not-needed"
+# model: "qwen2.5-72b-instruct"
+
+# 评估参数
+temperature: 0.1
+max_retries: 3
+retry_delay: 2
